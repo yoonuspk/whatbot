@@ -1,89 +1,110 @@
 import { useState } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { ConversationListItem } from "@/components/conversation-list-item";
 import { MessageBubble } from "@/components/message-bubble";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
-import { Search, Send, Phone, MoreVertical } from "lucide-react";
+import { Search, Send, Phone, MoreVertical, MessageSquare } from "lucide-react";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import type { Contact, Message } from "@shared/schema";
+import { useToast } from "@/hooks/use-toast";
 
 export default function Conversations() {
-  const [selectedConversation, setSelectedConversation] = useState("1");
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [messageText, setMessageText] = useState("");
+  const { toast } = useToast();
 
-  const conversations = [
-    {
-      id: "1",
-      name: "John Doe",
-      phoneNumber: "+1234567890",
-      lastMessage: "Thanks for the information!",
-      timestamp: new Date(Date.now() - 1000 * 60 * 5),
-      unreadCount: 2,
-      status: "delivered" as const,
-    },
-    {
-      id: "2",
-      name: "Jane Smith",
-      phoneNumber: "+1987654321",
-      lastMessage: "I'll get back to you soon.",
-      timestamp: new Date(Date.now() - 1000 * 60 * 30),
-      status: "read" as const,
-    },
-    {
-      id: "3",
-      name: "Alex Johnson",
-      phoneNumber: "+1122334455",
-      lastMessage: "Order confirmed!",
-      timestamp: new Date(Date.now() - 1000 * 60 * 60 * 2),
-      unreadCount: 1,
-      status: "sent" as const,
-    },
-  ];
+  const { data: contacts = [], isLoading: loadingContacts } = useQuery<Contact[]>({
+    queryKey: ["/api/contacts"],
+  });
 
-  const messages = [
-    {
-      id: "1",
-      content: "Hello! How can I help you today?",
-      direction: "outbound" as const,
-      timestamp: new Date(Date.now() - 1000 * 60 * 30),
-      status: "read" as const,
-      messageType: "template" as const,
-    },
-    {
-      id: "2",
-      content: "I'd like to know more about your services.",
-      direction: "inbound" as const,
-      timestamp: new Date(Date.now() - 1000 * 60 * 25),
-    },
-    {
-      id: "3",
-      content: "Of course! We offer WhatsApp Business API integration, flow builder, and template management.",
-      direction: "outbound" as const,
-      timestamp: new Date(Date.now() - 1000 * 60 * 20),
-      status: "delivered" as const,
-    },
-    {
-      id: "4",
-      content: "That sounds great! Can you send me more details?",
-      direction: "inbound" as const,
-      timestamp: new Date(Date.now() - 1000 * 60 * 15),
-    },
-    {
-      id: "5",
-      content: "Thanks for the information!",
-      direction: "inbound" as const,
-      timestamp: new Date(Date.now() - 1000 * 60 * 5),
-    },
-  ];
+  const { data: allMessages = [] } = useQuery<Message[]>({
+    queryKey: ["/api/messages"],
+  });
 
-  const selectedContact = conversations.find((c) => c.id === selectedConversation);
+  const sendMessageMutation = useMutation({
+    mutationFn: async (data: { phoneNumber: string; message: string }) => {
+      return await apiRequest("POST", "/api/whatsapp/send", data);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/messages"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/contacts"] });
+      toast({
+        title: "Message sent",
+        description: "Your message has been sent successfully.",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to send message. Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const conversationsWithLastMessage = contacts.map((contact) => {
+    const contactMessages = allMessages
+      .filter((m) => m.contactId === contact.id)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    const lastMessage = contactMessages[0];
+    const unreadCount = contactMessages.filter(
+      (m) => m.direction === "inbound" && m.status !== "read"
+    ).length;
+
+    return {
+      ...contact,
+      lastMessage: lastMessage?.content || "No messages yet",
+      timestamp: lastMessage ? new Date(lastMessage.timestamp) : new Date(contact.createdAt),
+      unreadCount,
+      status: lastMessage?.status as "sent" | "delivered" | "read" | "failed" | undefined,
+    };
+  }).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+
+  const selectedContact = conversationsWithLastMessage.find(
+    (c) => c.id === selectedConversationId
+  );
+
+  const selectedMessages = selectedContact
+    ? allMessages
+        .filter((m) => m.contactId === selectedContact.id)
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+    : [];
 
   const handleSend = () => {
-    if (messageText.trim()) {
-      console.log("Sending message:", messageText);
+    if (messageText.trim() && selectedContact) {
+      sendMessageMutation.mutate({
+        phoneNumber: selectedContact.phoneNumber,
+        message: messageText,
+      });
       setMessageText("");
     }
   };
+
+  if (loadingContacts) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <p className="text-muted-foreground">Loading conversations...</p>
+      </div>
+    );
+  }
+
+  if (conversationsWithLastMessage.length === 0) {
+    return (
+      <div className="h-screen flex items-center justify-center">
+        <div className="text-center">
+          <MessageSquare className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+          <h2 className="text-xl font-semibold mb-2">No conversations yet</h2>
+          <p className="text-muted-foreground">
+            Start a conversation by sending a message from the dashboard
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex">
@@ -99,24 +120,30 @@ export default function Conversations() {
           </div>
         </div>
         <div className="flex-1 overflow-y-auto">
-          {conversations.map((conversation) => (
+          {conversationsWithLastMessage.map((conversation) => (
             <ConversationListItem
               key={conversation.id}
-              {...conversation}
-              onClick={() => setSelectedConversation(conversation.id)}
+              id={conversation.id}
+              name={conversation.name || conversation.phoneNumber}
+              phoneNumber={conversation.phoneNumber}
+              lastMessage={conversation.lastMessage}
+              timestamp={conversation.timestamp}
+              unreadCount={conversation.unreadCount}
+              status={conversation.status}
+              onClick={() => setSelectedConversationId(conversation.id)}
             />
           ))}
         </div>
       </div>
 
       <div className="flex-1 flex flex-col">
-        {selectedContact && (
+        {selectedContact ? (
           <>
             <div className="h-16 border-b border-border px-6 flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <Avatar className="h-10 w-10">
                   <AvatarFallback className="bg-primary/10 text-primary">
-                    {selectedContact.name
+                    {(selectedContact.name || selectedContact.phoneNumber)
                       .split(" ")
                       .map((n) => n[0])
                       .join("")
@@ -125,7 +152,9 @@ export default function Conversations() {
                   </AvatarFallback>
                 </Avatar>
                 <div>
-                  <h2 className="font-semibold">{selectedContact.name}</h2>
+                  <h2 className="font-semibold">
+                    {selectedContact.name || selectedContact.phoneNumber}
+                  </h2>
                   <p className="text-xs text-muted-foreground">
                     {selectedContact.phoneNumber}
                   </p>
@@ -142,9 +171,22 @@ export default function Conversations() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-6 bg-muted/20">
-              {messages.map((message) => (
-                <MessageBubble key={message.id} {...message} />
-              ))}
+              {selectedMessages.length === 0 ? (
+                <div className="flex items-center justify-center h-full">
+                  <p className="text-muted-foreground">No messages yet. Start the conversation!</p>
+                </div>
+              ) : (
+                selectedMessages.map((message) => (
+                  <MessageBubble
+                    key={message.id}
+                    content={message.content}
+                    direction={message.direction as "inbound" | "outbound"}
+                    timestamp={new Date(message.timestamp)}
+                    status={message.status as "sent" | "delivered" | "read" | "failed" | undefined}
+                    messageType={message.messageType as "text" | "template" | undefined}
+                  />
+                ))
+              )}
             </div>
 
             <div className="p-4 border-t border-border">
@@ -155,47 +197,62 @@ export default function Conversations() {
                   onChange={(e) => setMessageText(e.target.value)}
                   onKeyPress={(e) => e.key === "Enter" && handleSend()}
                   data-testid="input-message"
+                  disabled={sendMessageMutation.isPending}
                 />
-                <Button onClick={handleSend} data-testid="button-send">
+                <Button
+                  onClick={handleSend}
+                  data-testid="button-send"
+                  disabled={sendMessageMutation.isPending || !messageText.trim()}
+                >
                   <Send className="h-4 w-4" />
                 </Button>
               </div>
             </div>
           </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center">
+              <MessageSquare className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+              <h2 className="text-xl font-semibold mb-2">Select a conversation</h2>
+              <p className="text-muted-foreground">
+                Choose a conversation from the list to view messages
+              </p>
+            </div>
+          </div>
         )}
       </div>
 
-      <div className="w-80 border-l border-border p-6">
-        <Card>
-          <CardHeader>
-            <h3 className="font-semibold">Contact Info</h3>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {selectedContact && (
-              <>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
-                    Name
-                  </p>
-                  <p className="font-medium">{selectedContact.name}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
-                    Phone Number
-                  </p>
-                  <p className="font-mono text-sm">{selectedContact.phoneNumber}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
-                    Last Message
-                  </p>
-                  <p className="text-sm">{selectedContact.lastMessage}</p>
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+      {selectedContact && (
+        <div className="w-80 border-l border-border p-6">
+          <Card>
+            <CardHeader>
+              <h3 className="font-semibold">Contact Info</h3>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
+                  Name
+                </p>
+                <p className="font-medium">
+                  {selectedContact.name || "Unknown"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
+                  Phone Number
+                </p>
+                <p className="font-mono text-sm">{selectedContact.phoneNumber}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
+                  Messages
+                </p>
+                <p className="text-sm">{selectedMessages.length} total</p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
